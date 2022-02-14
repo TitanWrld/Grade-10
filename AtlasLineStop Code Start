@@ -1,0 +1,24 @@
+#include <PRIZM.h>
+PRIZM prizm;
+
+void setup() {
+  prizm.PrizmBegin();
+  prizm.setMotorInvert(2,1);
+  }
+  
+  void loop() {
+while(prizm.readLineSensor(5)== 0){
+prizm.setMotorPower(1,50);
+prizm.setMotorPower(2,50);
+  
+}
+  
+
+
+while(prizm.readLineSensor(5)== 1){
+  prizm.setMotorPower(1,125);
+  prizm.setMotorPower(2,125);
+  
+}
+
+  }
