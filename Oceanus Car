@@ -1,0 +1,29 @@
+#include <TELEOP.h>   
+#include <PRIZM.h>    
+
+PRIZM prizm;          
+PS4 ps4;        
+  
+
+void setup() {
+  prizm.PrizmBegin();            
+  ps4.setDeadZone (LEFT,10);     
+  ps4.setDeadZone(RIGHT,10); 
+}
+
+void loop() {
+
+  ps4.getPS4();                                 
+
+  if(ps4.Connected){   
+    if(ps4.Button(R2)){
+         prizm.setMotorPower(1,100);
+         prizm.setMotorPower(2,100);
+    }
+  }
+    if(ps4.Button(L2)){
+      prizm.setMotorPower(1,-100);
+      prizm.setMotorPower(2,-100);
+      
+    }
+  } else { 
