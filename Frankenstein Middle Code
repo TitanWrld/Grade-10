@@ -1,0 +1,51 @@
+#include <PRIZM.h>    // include the PRIZM library in the sketch
+#include <TELEOP.h>  
+PRIZM prizm;          // instantiate a PRIZM object “prizm” so we can use its functions
+PS4 ps4; 
+
+void setup() {
+
+  prizm.PrizmBegin();         // initialize the PRIZM controller
+  prizm.setServoSpeed(1,25);   // set servo 1 speed to 25%
+  ps4.setDeadZone (LEFT,10);     
+  ps4.setDeadZone(RIGHT,10);
+
+}
+
+void loop() {     // repeat in a loop
+    prizm.setMotorInvert(2,1);
+  ps4.getPS4();
+  
+    if(ps4.Button(L1)){
+  prizm.setServoPosition(1,80);  // rotate servo1 to 80 degrees
+  delay(100);                    // wait for 3 seconds to give servo1 time
+    }
+   if(ps4.Button(R1)){
+  prizm.setServoPosition(1,30);    // rotate servo1 to 30 degrees
+  delay(100);                    // wait for 3 seconds to give servo1 time
+    }
+        
+        
+        if(ps4.Button(DOWN)){
+      prizm.setMotorPower(1,-100);
+      prizm.setMotorPower(2,-100);
+        }
+       if(ps4.Button(UP)){
+         prizm.setMotorPower(1,100);
+         prizm.setMotorPower(2,100);
+       }
+         if(ps4.Button(CIRCLE)){
+          prizm.setMotorPower(1,0);
+          prizm.setMotorPower(2,0);
+         }
+      if(ps4.Button(RIGHT)){
+          prizm.setMotorPower(1,10);
+          prizm.setMotorPower(2,100);
+      }
+
+       if(ps4.Button(LEFT)){
+          prizm.setMotorPower(1,100);
+          prizm.setMotorPower(2,10);
+      }
+    }
+    
