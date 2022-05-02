@@ -226,9 +226,14 @@ void turn(char direction, bool randomize)
 #endif
 
   // assume contact lost
-  on_contact_lost();
+  on_contact_lost()
 
-//ircode
+  //==============
+    //IRCode
+    // proxSensors.read();
+    // uint8_t sum = proxSensors.countsFrontWithRightLeds() + proxSensors.countsFrontWithLeftLeds();
+    // int8_t diff = proxSensors.countsFrontWithRightLeds() - proxSensors.countsFrontWithLeftLeds();
+  //==============
 
   static unsigned int duration_increment = TURN_DURATION / 4;
 
