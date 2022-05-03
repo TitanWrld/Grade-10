@@ -1,3 +1,4 @@
+
 #include <Wire.h>
 #include <Zumo32U4.h>
 
@@ -21,7 +22,7 @@ const uint16_t lineSensorThreshold = 1000;
 const uint16_t reverseSpeed = 200;
 
 // The speed that the robot uses when turning.
-const uint16_t turnSpeed = 275;
+const uint16_t turnSpeed = 250;
 
 // The speed that the robot usually uses when moving forward.
 // You don't want this to be too fast because then the robot
@@ -84,7 +85,7 @@ enum Direction
 
 // scanDir is the direction the robot should turn the next time
 // it scans for an opponent.
-Direction scanDir = DirectionLeft;
+Direction scanDir = DirectionRight;
 
 // The time, in milliseconds, that we entered the current top-level state.
 uint16_t stateStartTime;
@@ -202,7 +203,7 @@ changeState(StateScanning);
         break;
         case 3:
         //code 3
-        motors.setSpeeds(-100, -400);
+        motors.setSpeeds(-50, -400);
         delay(530);
 changeState(StateScanning);
         break;
@@ -245,6 +246,7 @@ changeState(StateScanning);
       lcd.print(F("scan"));
     }
 
+    
     if (scanDir == DirectionRight)
     {
       motors.setSpeeds(turnSpeed, -turnSpeed);
