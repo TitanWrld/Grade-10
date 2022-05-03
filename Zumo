@@ -1,446 +1,408 @@
-
-#include <avr/pgmspace.h>
 #include <Wire.h>
 #include <Zumo32U4.h>
 
-// #define LOG_SERIAL // write log output to serial port
-
-// Change next line to this if you are using the older Zumo 32U4
-// with a black and green LCD display:
-// Zumo32U4LCD display;
-Zumo32U4OLED display;
-
-Zumo32U4ButtonA button;
-
-// Accelerometer Settings
-#define RA_SIZE 3  // number of readings to include in running average of accelerometer readings
-#define XY_ACCELERATION_THRESHOLD 2400  // for detection of contact (~16000 = magnitude of acceleration due to gravity)
-
-// Reflectance Sensor Settings
-#define NUM_SENSORS 5
-unsigned int sensor_values[NUM_SENSORS];
-// this might need to be tuned for different lighting conditions, surfaces, etc.
-#define QTR_THRESHOLD  1000 // microseconds
-Zumo32U4LineSensors sensors;
-
-// Motor Settings
-Zumo32U4Motors motors;
-
-// these might need to be tuned for different motor types
-#define REVERSE_SPEED     250 // 0 is stopped, 400 is full speed
-#define TURN_SPEED        250
-#define SEARCH_SPEED      200
-#define SUSTAINED_SPEED   300 // switches to SUSTAINED_SPEED from FULL_SPEED after FULL_SPEED_DURATION_LIMIT ms
-#define FULL_SPEED        400
-#define STOP_DURATION     100 // ms
-#define REVERSE_DURATION  300 // ms
-#define TURN_DURATION     300 // ms
-
-#define RIGHT 1
-#define LEFT -1
-
-enum ForwardSpeed { SearchSpeed, SustainedSpeed, FullSpeed };
-ForwardSpeed _forwardSpeed;  // current forward speed setting
-unsigned long full_speed_start_time;
-#define FULL_SPEED_DURATION_LIMIT     250  // ms
-
-// Sound Effects
+Zumo32U4LCD lcd;
+Zumo32U4ButtonA buttonA;
+Zumo32U4ButtonB buttonB;
 Zumo32U4Buzzer buzzer;
-const char sound_effect[] PROGMEM = "O4 T100 V15 L4 MS g12>c12>e12>G6>E12 ML>G2"; // "charge" melody
- // use V0 to suppress sound effect; v15 for max volume
+Zumo32U4Motors motors;
+Zumo32U4LineSensors lineSensors;
+Zumo32U4ProximitySensors proxSensors;
 
- // Timing
-unsigned long loop_start_time;
-unsigned long last_turn_time;
-unsigned long contact_made_time;
-#define MIN_DELAY_AFTER_TURN          400  // ms = min delay before detecting contact event
-#define MIN_DELAY_BETWEEN_CONTACTS   1000  // ms = min delay between detecting new contact event
+unsigned int lineSensorValues[3];
 
-// RunningAverage class
-// based on RunningAverage library for Arduino
-// source:  http://playground.arduino.cc/Main/RunningAverage
-template <typename T>
-class RunningAverage
+// When the reading on a line sensor goes below this value, we
+// consider that line sensor to have detected the white border at
+// the edge of the ring.  This value might need to be tuned for
+// different lighting conditions, surfaces, etc.
+const uint16_t lineSensorThreshold = 1000;
+
+// The speed that the robot uses when backing up.
+const uint16_t reverseSpeed = 200;
+
+// The speed that the robot uses when turning.
+const uint16_t turnSpeed = 275;
+
+// The speed that the robot usually uses when moving forward.
+// You don't want this to be too fast because then the robot
+// might fail to stop when it detects the white border.
+const uint16_t forwardSpeed = 325;
+
+// These two variables specify the speeds to apply to the motors
+// when veering left or veering right.  While the robot is
+// driving forward, it uses its proximity sensors to scan for
+// objects ahead of it and tries to veer towards them.
+const uint16_t veerSpeedLow = 0;
+const uint16_t veerSpeedHigh = 350;
+
+// The speed that the robot drives when it detects an opponent in
+// front of it, either with the proximity sensors or by noticing
+// that it is caught in a stalemate (driving forward for several
+// seconds without reaching a border).  400 is full speed.
+const uint16_t rammingSpeed = 400;
+
+// The amount of time to spend backing up after detecting a
+// border, in milliseconds.
+const uint16_t reverseTime = 600;
+
+// The minimum amount of time to spend scanning for nearby
+// opponents, in milliseconds.
+const uint16_t scanTimeMin = 200;
+
+// The maximum amount of time to spend scanning for nearby
+// opponents, in milliseconds.
+const uint16_t scanTimeMax = 2100;
+
+// The amount of time to wait between detecting a button press
+// and actually starting to move, in milliseconds.  Typical robot
+// sumo rules require 5 seconds of waiting.
+const uint16_t waitTime = 5000;
+
+// If the robot has been driving forward for this amount of time,
+// in milliseconds, without reaching a border, the robot decides
+// that it must be pushing on another robot and this is a
+// stalemate, so it increases its motor speed.
+const uint16_t stalemateTime = 3200;
+
+// This enum lists the top-level states that the robot can be in.
+enum State
 {
-  public:
-    RunningAverage(void);
-    RunningAverage(int);
-    ~RunningAverage();
-    void clear();
-    void addValue(T);
-    T getAverage() const;
-    void fillValue(T, int);
-  protected:
-    int _size;
-    int _cnt;
-    int _idx;
-    T _sum;
-    T * _ar;
-    static T zero;
+  StatePausing,
+  StateWaiting,
+  StateScanning,
+  StateDriving,
+  StateBacking,
 };
 
-// Accelerometer Class -- extends the Zumo32U4IMU class to support reading and
-//   averaging the x-y acceleration vectors from the accelerometer
-class Accelerometer : public Zumo32U4IMU
-{
-  typedef struct acc_data_xy
-  {
-    unsigned long timestamp;
-    int x;
-    int y;
-    float dir;
-  } acc_data_xy;
+State state = StatePausing;
 
-  public:
-    Accelerometer() : ra_x(RA_SIZE), ra_y(RA_SIZE) {};
-    ~Accelerometer() {};
-    void getLogHeader(void);
-    void readAcceleration(unsigned long timestamp);
-    float len_xy() const;
-    float dir_xy() const;
-    int x_avg(void) const;
-    int y_avg(void) const;
-    long ss_xy_avg(void) const;
-    float dir_xy_avg(void) const;
-  private:
-    acc_data_xy last;
-    RunningAverage<int> ra_x;
-    RunningAverage<int> ra_y;
+enum Direction
+{
+  DirectionLeft,
+  DirectionRight,
 };
 
-Accelerometer acc;
-boolean in_contact;  // set when accelerometer detects contact with opposing robot
+// scanDir is the direction the robot should turn the next time
+// it scans for an opponent.
+Direction scanDir = DirectionLeft;
 
-// forward declaration
-void setForwardSpeed(ForwardSpeed speed);
+// The time, in milliseconds, that we entered the current top-level state.
+uint16_t stateStartTime;
+
+// The time, in milliseconds, that the LCD was last updated.
+uint16_t displayTime;
+
+// This gets set to true whenever we change to a new state.
+// A state can read and write this variable this in order to
+// perform actions just once at the beginning of the state.
+bool justChangedState;
+
+// This gets set whenever we clear the display.
+bool displayCleared;
+
+int modeSelect = 0; 
 
 void setup()
 {
-  sensors.initFiveSensors();
-
-  // Initialize the Wire library and join the I2C bus as a master
-  Wire.begin();
-
-  // Initialize accelerometer
-  acc.init();
-  acc.enableDefault();
-
-#ifdef LOG_SERIAL
-  acc.getLogHeader();
-#endif
-
-  randomSeed((unsigned int) millis());
-
   // Uncomment if necessary to correct motor directions:
   //motors.flipLeftMotor(true);
   //motors.flipRightMotor(true);
 
-  ledYellow(1);
-  buzzer.playMode(PLAY_AUTOMATIC);
-  waitForButtonAndCountDown(false);
-}
+  lineSensors.initThreeSensors();
+  proxSensors.initThreeSensors();
 
-void waitForButtonAndCountDown(bool restarting)
-{
-#ifdef LOG_SERIAL
-  Serial.print(restarting ? "Restarting Countdown" : "Starting Countdown");
-  Serial.println();
-#else
-  (void)restarting; // suppress unused variable warning
-#endif
-
-  ledRed(0);
-
-  ledYellow(1);
-  display.clear();
-  display.print(F("Press A"));
-
-  button.waitForButton();
-
-  ledYellow(0);
-  display.clear();
-
-  // play audible countdown
-  for (int i = 0; i < 3; i++)
-  {
-    delay(1000);
-    buzzer.playNote(NOTE_G(3), 50, 12);
-  }
-  delay(1000);
-  buzzer.playFromProgramSpace(sound_effect);
-  delay(1000);
-
-  // reset loop variables
-  in_contact = false;  // 1 if contact made; 0 if no contact or contact lost
-  contact_made_time = 0;
-  last_turn_time = millis();  // prevents false contact detection on initial acceleration
-  _forwardSpeed = SearchSpeed;
-  full_speed_start_time = 0;
+  changeState(StatePausing);
 }
 
 void loop()
 {
-  if (button.isPressed())
+  bool buttonPress = buttonA.getSingleDebouncedPress();
+
+  if (buttonB.getSingleDebouncedPress())
   {
-    // if button is pressed, stop and wait for another press to go again
+    modeSelect++;
+    if (modeSelect > 3){
+      modeSelect = 0; 
+    }
+  }
+  
+  if (state == StatePausing)
+  {
+    // In this state, we just wait for the user to press button
+    // A, while displaying the battery voltage every 100 ms.
+
     motors.setSpeeds(0, 0);
-    button.waitForRelease();
-    waitForButtonAndCountDown(true);
+
+    if (justChangedState)
+    {
+      justChangedState = false;
+      lcd.print(F("Press A"));
+    }
+
+    if (displayIsStale(100))
+    {
+      displayUpdated();
+      lcd.gotoXY(0, 1);
+      lcd.print(readBatteryMillivolts());
+      lcd.gotoXY(7, 1);
+      lcd.print(modeSelect);
+    }
+
+    if (buttonPress)
+    {
+      // The user pressed button A, so go to the waiting state.
+      changeState(StateWaiting);
+    }
   }
-
-  loop_start_time = millis();
-  acc.readAcceleration(loop_start_time);
-  sensors.read(sensor_values);
-
-  if ((_forwardSpeed == FullSpeed) && (loop_start_time - full_speed_start_time > FULL_SPEED_DURATION_LIMIT))
+  else if (buttonPress)
   {
-    setForwardSpeed(SustainedSpeed);
+    // The user pressed button A while the robot was running, so pause.
+    changeState(StatePausing);
   }
-
-  if (sensor_values[0] < QTR_THRESHOLD)
+  else if (state == StateWaiting)
   {
-    // if leftmost sensor detects line, reverse and turn to the right
-    turn(RIGHT, true);
+    // In this state, we wait for a while and then move on to the
+    // scanning state.
+
+    motors.setSpeeds(0, 0);
+
+    uint16_t time = timeInThisState();
+
+    if (time < waitTime)
+    {
+      // Display the remaining time we have to wait.
+      uint16_t timeLeft = waitTime - time;
+      lcd.gotoXY(0, 0);
+      lcd.print(timeLeft / 1000 % 10);
+      lcd.print('.');
+      lcd.print(timeLeft / 100 % 10);
+
+     
+      
+    }
+    else
+    {
+       switch (modeSelect){
+        case 0:
+        changeState(StateScanning);
+        break;
+        case 1:
+        //code option 1
+        motors.setSpeeds(300, -300);
+        delay(280);
+changeState(StateScanning);
+        break;
+        case 2:
+        //code 2
+        motors.setSpeeds(350, 350);
+        delay(350);
+        motors.setSpeeds(300, -300);
+        delay(540);
+changeState(StateScanning);
+        break;
+        case 3:
+        //code 3
+        motors.setSpeeds(-100, -400);
+        delay(530);
+changeState(StateScanning);
+        break;
+        default:
+        changeState(StateScanning);
+        break;
+      }
+      
+      // We have waited long enough.  Start moving.
+      
+    }
   }
-  else if (sensor_values[NUM_SENSORS - 1] < QTR_THRESHOLD)
+  else if (state == StateBacking)
   {
-    // if rightmost sensor detects line, reverse and turn to the left
-    turn(LEFT, true);
+    // In this state, the robot drives in reverse.
+
+    if (justChangedState)
+    {
+      justChangedState = false;
+      lcd.print(F("back"));
+    }
+
+    motors.setSpeeds(-reverseSpeed, -reverseSpeed);
+
+    // After backing up for a specific amount of time, start
+    // scanning.
+    if (timeInThisState() >= reverseTime)
+    {
+      changeState(StateScanning);
+    }
   }
-  else  // otherwise, go straight
+  else if (state == StateScanning)
   {
-    if (check_for_contact()) on_contact_made();
-    int speed = getForwardSpeed();
-    motors.setSpeeds(speed, speed);
+    // In this state the robot rotates in place and tries to find
+    // its opponent.
+
+    if (justChangedState)
+    {
+      justChangedState = false;
+      lcd.print(F("scan"));
+    }
+
+    if (scanDir == DirectionRight)
+    {
+      motors.setSpeeds(turnSpeed, -turnSpeed);
+    }
+    else
+    {
+      motors.setSpeeds(-turnSpeed, turnSpeed);
+    }
+
+    uint16_t time = timeInThisState();
+
+    if (time > scanTimeMax)
+    {
+      // We have not seen anything for a while, so start driving.
+      changeState(StateDriving);
+    }
+    else if (time > scanTimeMin)
+    {
+      // Read the proximity sensors.  If we detect anything with
+      // the front sensor, then start driving forwards.
+      proxSensors.read();
+      if (proxSensors.countsFrontWithLeftLeds() >= 2
+        || proxSensors.countsFrontWithRightLeds() >= 2)
+      {
+        changeState(StateDriving);
+      }
+    }
   }
-}
-
-// execute turn
-// direction:  RIGHT or LEFT
-// randomize: to improve searching
-void turn(char direction, bool randomize)
-{
-#ifdef LOG_SERIAL
-  Serial.print("turning ...");
-  Serial.println();
-#endif
-
-  // assume contact lost
-  on_contact_lost()
-
-  //==============
-    //IRCode
-    // proxSensors.read();
-    // uint8_t sum = proxSensors.countsFrontWithRightLeds() + proxSensors.countsFrontWithLeftLeds();
-    // int8_t diff = proxSensors.countsFrontWithRightLeds() - proxSensors.countsFrontWithLeftLeds();
-  //==============
-
-  static unsigned int duration_increment = TURN_DURATION / 4;
-
-  // motors.setSpeeds(0,0);
-  // delay(STOP_DURATION);
-  motors.setSpeeds(-REVERSE_SPEED, -REVERSE_SPEED);
-  delay(REVERSE_DURATION);
-  motors.setSpeeds(TURN_SPEED * direction, -TURN_SPEED * direction);
-  delay(randomize ? TURN_DURATION + (random(8) - 2) * duration_increment : TURN_DURATION);
-  int speed = getForwardSpeed();
-  motors.setSpeeds(speed, speed);
-  last_turn_time = millis();
-}
-
-void setForwardSpeed(ForwardSpeed speed)
-{
-  _forwardSpeed = speed;
-  if (speed == FullSpeed) full_speed_start_time = loop_start_time;
-}
-
-int getForwardSpeed()
-{
-  int speed;
-  switch (_forwardSpeed)
+  else if (state == StateDriving)
   {
-    case FullSpeed:
-      speed = FULL_SPEED;
-      break;
-    case SustainedSpeed:
-      speed = SUSTAINED_SPEED;
-      break;
-    default:
-      speed = SEARCH_SPEED;
-      break;
+    // In this state we drive forward while also looking for the
+    // opponent using the proximity sensors and checking for the
+    // white border.
+
+    if (justChangedState)
+    {
+      justChangedState = false;
+      lcd.print(F("drive"));
+    }
+
+    // Check for borders.
+    lineSensors.read(lineSensorValues);
+    if (lineSensorValues[0] < lineSensorThreshold)
+    {
+      scanDir = DirectionRight;
+      changeState(StateBacking);
+    }
+    if (lineSensorValues[2] < lineSensorThreshold)
+    {
+      scanDir = DirectionLeft;
+      changeState(StateBacking);
+    }
+
+    // Read the proximity sensors to see if know where the
+    // opponent is.
+    proxSensors.read();
+    uint8_t sum = proxSensors.countsFrontWithRightLeds() + proxSensors.countsFrontWithLeftLeds();
+    int8_t diff = proxSensors.countsFrontWithRightLeds() - proxSensors.countsFrontWithLeftLeds();
+
+    if (sum >= 4 || timeInThisState() > stalemateTime)
+    {
+      // The front sensor is getting a strong signal, or we have
+      // been driving forward for a while now without seeing the
+      // border.  Either way, there is probably a robot in front
+      // of us and we should switch to ramming speed to try to
+      // push the robot out of the ring.
+      motors.setSpeeds(rammingSpeed, rammingSpeed);
+
+      // Turn on the red LED when ramming.
+      ledRed(1);
+    }
+    else if (sum == 0)
+    {
+      // We don't see anything with the front sensor, so just
+      // keep driving forward.  Also monitor the side sensors; if
+      // they see an object then we want to go to the scanning
+      // state and turn torwards that object.
+
+      motors.setSpeeds(forwardSpeed, forwardSpeed);
+
+      if (proxSensors.countsLeftWithLeftLeds() >= 2)
+      {
+        // Detected something to the left.
+        scanDir = DirectionLeft;
+        changeState(StateScanning);
+      }
+
+      if (proxSensors.countsRightWithRightLeds() >= 2)
+      {
+        // Detected something to the right.
+        scanDir = DirectionRight;
+        changeState(StateScanning);
+      }
+
+      ledRed(0);
+    }
+    else
+    {
+      // We see something with the front sensor but it is not a
+      // strong reading.
+
+      if (diff >= 1)
+      {
+        // The right-side reading is stronger, so veer to the right.
+        motors.setSpeeds(veerSpeedHigh, veerSpeedLow);
+      }
+      else if (diff <= -1)
+      {
+        // The left-side reading is stronger, so veer to the left.
+        motors.setSpeeds(veerSpeedLow, veerSpeedHigh);
+      }
+      else
+      {
+        // Both readings are equal, so just drive forward.
+        motors.setSpeeds(forwardSpeed, forwardSpeed);
+      }
+      ledRed(0);
+    }
   }
-  return speed;
 }
 
-// check for contact, but ignore readings immediately after turning or losing contact
-bool check_for_contact()
+// Gets the amount of time we have been in this state, in
+// milliseconds.  After 65535 milliseconds (65 seconds), this
+// overflows to 0.
+uint16_t timeInThisState()
 {
-  static long threshold_squared = (long) XY_ACCELERATION_THRESHOLD * (long) XY_ACCELERATION_THRESHOLD;
-  return (acc.ss_xy_avg() >  threshold_squared) && \
-    (loop_start_time - last_turn_time > MIN_DELAY_AFTER_TURN) && \
-    (loop_start_time - contact_made_time > MIN_DELAY_BETWEEN_CONTACTS);
+  return (uint16_t)(millis() - stateStartTime);
 }
 
-// sound horn and accelerate on contact -- fight or flight
-void on_contact_made()
+// Changes to a new state.  It also clears the LCD and turns off
+// the LEDs so that the things the previous state were doing do
+// not affect the feedback the user sees in the new state.
+void changeState(uint8_t newState)
 {
-#ifdef LOG_SERIAL
-  Serial.print("contact made");
-  Serial.println();
-#endif
-  in_contact = true;
-  contact_made_time = loop_start_time;
-  setForwardSpeed(FullSpeed);
-  buzzer.playFromProgramSpace(sound_effect);
-  ledRed(1);
-}
-
-// reset forward speed
-void on_contact_lost()
-{
-#ifdef LOG_SERIAL
-  Serial.print("contact lost");
-  Serial.println();
-#endif
-  in_contact = false;
-  setForwardSpeed(SearchSpeed);
+  state = (State)newState;
+  justChangedState = true;
+  stateStartTime = millis();
   ledRed(0);
+  ledYellow(0);
+  ledGreen(0);
+  lcd.clear();
+  displayCleared = true;
 }
 
-// class Accelerometer -- member function definitions
-
-void Accelerometer::getLogHeader(void)
+// Returns true if the display has been cleared or the contents
+// on it have not been updated in a while.  The time limit used
+// to decide if the contents are staled is specified in
+// milliseconds by the staleTime parameter.
+bool displayIsStale(uint16_t staleTime)
 {
-  Serial.print("millis    x      y     len     dir  | len_avg  dir_avg  |  avg_len");
-  Serial.println();
+  return displayCleared || (millis() - displayTime) > staleTime;
 }
 
-void Accelerometer::readAcceleration(unsigned long timestamp)
+// Any part of the code that uses displayIsStale to decide when
+// to update the LCD should call this function when it updates the
+// LCD.
+void displayUpdated()
 {
-  readAcc();
-  if (a.x == last.x && a.y == last.y) return;
-
-  last.timestamp = timestamp;
-  last.x = a.x;
-  last.y = a.y;
-
-  ra_x.addValue(last.x);
-  ra_y.addValue(last.y);
-
-#ifdef LOG_SERIAL
- Serial.print(last.timestamp);
- Serial.print("  ");
- Serial.print(last.x);
- Serial.print("  ");
- Serial.print(last.y);
- Serial.print("  ");
- Serial.print(len_xy());
- Serial.print("  ");
- Serial.print(dir_xy());
- Serial.print("  |  ");
- Serial.print(sqrt(static_cast<float>(ss_xy_avg())));
- Serial.print("  ");
- Serial.print(dir_xy_avg());
- Serial.println();
-#endif
-}
-
-float Accelerometer::len_xy() const
-{
-  return sqrt(last.x*a.x + last.y*a.y);
-}
-
-float Accelerometer::dir_xy() const
-{
-  return atan2(last.x, last.y) * 180.0 / M_PI;
-}
-
-int Accelerometer::x_avg(void) const
-{
-  return ra_x.getAverage();
-}
-
-int Accelerometer::y_avg(void) const
-{
-  return ra_y.getAverage();
-}
-
-long Accelerometer::ss_xy_avg(void) const
-{
-  long x_avg_long = static_cast<long>(x_avg());
-  long y_avg_long = static_cast<long>(y_avg());
-  return x_avg_long*x_avg_long + y_avg_long*y_avg_long;
-}
-
-float Accelerometer::dir_xy_avg(void) const
-{
-  return atan2(static_cast<float>(x_avg()), static_cast<float>(y_avg())) * 180.0 / M_PI;
-}
-
-
-
-// RunningAverage class
-// based on RunningAverage library for Arduino
-// source:  http://playground.arduino.cc/Main/RunningAverage
-// author:  Rob.Tillart@gmail.com
-// Released to the public domain
-
-template <typename T>
-T RunningAverage<T>::zero = static_cast<T>(0);
-
-template <typename T>
-RunningAverage<T>::RunningAverage(int n)
-{
-  _size = n;
-  _ar = (T*) malloc(_size * sizeof(T));
-  clear();
-}
-
-template <typename T>
-RunningAverage<T>::~RunningAverage()
-{
-  free(_ar);
-}
-
-// resets all counters
-template <typename T>
-void RunningAverage<T>::clear()
-{
-  _cnt = 0;
-  _idx = 0;
-  _sum = zero;
-  for (int i = 0; i< _size; i++) _ar[i] = zero;  // needed to keep addValue simple
-}
-
-// adds a new value to the data-set
-template <typename T>
-void RunningAverage<T>::addValue(T f)
-{
-  _sum -= _ar[_idx];
-  _ar[_idx] = f;
-  _sum += _ar[_idx];
-  _idx++;
-  if (_idx == _size) _idx = 0;  // faster than %
-  if (_cnt < _size) _cnt++;
-}
-
-// returns the average of the data-set added so far
-template <typename T>
-T RunningAverage<T>::getAverage() const
-{
-  if (_cnt == 0) return zero; // NaN ?  math.h
-  return _sum / _cnt;
-}
-
-// fill the average with a value
-// the param number determines how often value is added (weight)
-// number should preferably be between 1 and size
-template <typename T>
-void RunningAverage<T>::fillValue(T value, int number)
-{
-  clear();
-  for (int i = 0; i < number; i++)
-  {
-    addValue(value);
-  }
+  displayTime = millis();
+  displayCleared = false;
 }
