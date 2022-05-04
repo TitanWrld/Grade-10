@@ -52,7 +52,7 @@ const uint16_t scanTimeMin = 200;
 
 // The maximum amount of time to spend scanning for nearby
 // opponents, in milliseconds.
-const uint16_t scanTimeMax = 2100;
+const uint16_t scanTimeMax = 800;
 
 // The amount of time to wait between detecting a button press
 // and actually starting to move, in milliseconds.  Typical robot
