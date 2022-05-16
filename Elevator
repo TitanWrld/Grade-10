@@ -1,0 +1,24 @@
+#include <PRIZM.h>
+PRIZM prizm;
+
+void setup() {
+  prizm.PrizmBegin();
+  }
+  
+  void loop() {
+
+if (prizm.readSonicSensorCM(3)<5){
+  prizm.setMotorPower(1, 0);
+  long targetRot = 0;
+  targetRot = prizm.readEncoderDegrees(1);
+  prizm.setMotorTarget(1, 200, -targetRot);
+   while(prizm.readMotorBusy(1)==true){};
+} else {
+  //Put up code here
+   prizm.setMotorPower(1, 100);
+}
+
+
+
+ 
+  }
